@@ -9,6 +9,7 @@ from collections import Counter
 from torch import optim
 from translation.lang import *
 from translation.masked_cross_entropy import *
+from translation.time import *
 
 USE_CUDA = True
 CUDA_DEVICE = 0
@@ -49,22 +50,7 @@ input_lang_test, output_lang_test, pairs_test = prepare_data('cmn', 'eng', 'casi
 
 
 def get_batch_size():
-    if epoch < 15000:
-        return 32
-    elif epoch < 30000:
-        return 64
-    elif epoch < 45000:
-        return 128
-    elif epoch < 60000:
-        return 256
-    elif epoch < 80000:
-        return 384
-    elif epoch < 80000:
-        return 512
-    elif epoch < 100000:
-        return 636
-    else:
-        return 764
+    return 512
 
 
 # Return a list of indexes, one for each word in the sentence, plus EOS
@@ -217,6 +203,62 @@ class LuongAttnDecoderRNN(nn.Module):
         return output, hidden, attn_weights
 
 
+class LuongAttnDecoderRNNSoftmax(nn.Module):
+    def __init__(self, attn_model, hidden_size, output_size, n_layers=1, dropout=0.1):
+        super(LuongAttnDecoderRNNSoftmax, self).__init__()
+
+        # Keep for reference
+        self.attn_model = attn_model
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.n_layers = n_layers
+        self.dropout = dropout
+
+        # Define layers
+        self.embedding_dropout = nn.Dropout(dropout)
+        self.gru = nn.GRU(hidden_size, hidden_size, n_layers, dropout=dropout)
+        self.concat = nn.Linear(hidden_size * 2, hidden_size)
+        self.out = nn.Linear(hidden_size, output_size)
+
+        # Choose attention model
+        if attn_model != 'none':
+            self.attn = Attn(attn_model, hidden_size)
+        self.softmax = nn.LogSoftmax()
+
+    def forward(self, input_seq, last_hidden, encoder_outputs):
+        # Note: we run this one step at a time
+
+        # Get the embedding of the current input word (last output word)
+        batch_size = input_seq.size(0)
+        embedded = decoder_embedding(input_seq)
+        embedded = self.embedding_dropout(embedded)
+        embedded = embedded.view(1, batch_size, self.hidden_size)  # S=1 x B x N
+
+        # Get current hidden state from input word and last hidden state
+        rnn_output, hidden = self.gru(embedded, last_hidden)
+
+        # Calculate attention from current RNN state and all encoder outputs;
+        # apply to encoder outputs to get weighted average
+        attn_weights = self.attn(rnn_output, encoder_outputs)
+        context = attn_weights.bmm(encoder_outputs.transpose(0, 1))  # B x S=1 x N
+
+        # Attentional vector using the RNN hidden state and context vector
+        # concatenated together (Luong eq. 5)
+        rnn_output = rnn_output.squeeze(0)  # S=1 x B x N -> B x N
+        context = context.squeeze(1)  # B x S=1 x N -> B x N
+        concat_input = torch.cat((rnn_output, context), 1)
+        concat_output = F.tanh(self.concat(concat_input))
+
+        # Finally predict next token (Luong eq. 6, without softmax)
+        output = self.out(concat_output)
+        # output = output.squeeze(0)  # B x N
+        # output = F.log_softmax(self.out(torch.cat((output, context), 1)))
+        output = self.softmax(output)
+
+        # Return final output, hidden state, and attention weights (for visualization)
+        return output, hidden, attn_weights
+
+
 def train(input_batches, input_lengths, target_batches, target_lengths, encoder, decoder, encoder_optimizer,
           decoder_optimizer, criterion, max_length=MAX_SENT_LENGTH):
     # Zero gradients of both optimizers
@@ -285,8 +327,17 @@ def load_checkpoint(net, optimizer, epoch, dir, net_index):
 
 # Initialize models
 encoder = EncoderRNN(input_lang_total.n_words, hidden_size, n_layers, dropout=dropout)
-decoders = [LuongAttnDecoderRNN(attn_model, hidden_size, output_lang_total.n_words, n_layers, dropout=dropout) for i in
-            range(networks)]
+use_softmax = True
+if not use_softmax:
+    decoders = [LuongAttnDecoderRNN(attn_model, hidden_size, output_lang_total.n_words, n_layers, dropout=dropout) for i in
+                range(networks)]
+    criterion = nn.CrossEntropyLoss()
+else:
+    decoders = [LuongAttnDecoderRNNSoftmax(attn_model, hidden_size, output_lang_total.n_words, n_layers, dropout=dropout) for i in
+                range(networks)]
+    criterion = nn.NLLLoss()
+    encoder_path += ".softmax"
+    decoder_path += ".softmax"
 
 encoder_embedding = nn.Embedding(input_lang_total.n_words, hidden_size)
 decoder_embedding = nn.Embedding(output_lang_total.n_words, hidden_size)
@@ -296,7 +347,6 @@ encoder_optimizer = optim.Adam(filter(lambda p: p.requires_grad, encoder.paramet
 decoder_optimizers = [
     optim.Adam(filter(lambda p: p.requires_grad, decoder.parameters()), lr=learning_rate * decoder_learning_ratio) for
     decoder in decoders]
-criterion = nn.CrossEntropyLoss()
 
 # Load previous checkpoints
 for i in range(networks):
@@ -492,77 +542,77 @@ def save_checkpoint(state, filename):
 
 for i in range(1):
     # Begin!
-    # while epoch < n_epochs:
-    #     epoch += 1
-    #     network = 0
-    #
-    #     input_batches, input_lengths, target_batches, target_lengths = random_batch(get_batch_size(), network)
-    #
-    #     for decoder, decoder_optimizer in zip(decoders, decoder_optimizers):
-    #         # Run the train function
-    #         loss, ec, dc = train(
-    #             input_batches, input_lengths, target_batches, target_lengths,
-    #             encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
-    #
-    #         # Keep track of loss
-    #         print_loss_total[network] += loss
-    #
-    #         network += 1
-    #
-    #     network = 0
-    #
-    #     for i in range(networks):
-    #         if epoch % log_every == 0:
-    #             print_loss_avg = print_loss_total[i] / log_every
-    #             loss_logger[i].append(print_loss_avg)
-    #             print_loss_total[i] = 0
-    #             print_summary = 'network %s %s (%d %d%%) %.4f' % (
-    #                 i, time_since(start, epoch / n_epochs), epoch, epoch / n_epochs * 100, print_loss_avg)
-    #             print(print_summary)
-    #             print(loss_logger[i])
-    #
-    #     if epoch % evaluate_every == 0:
-    #         network = 0
-    #         [input_sentence, target_sentence] = random.choice(pairs_test)  # USES TEST SET
-    #         print('sub networks:')
-    #         for decoder, decoder_optimizer in zip(decoders, decoder_optimizers):
-    #             evaluate_not_randomly(encoder, decoder, input_sentence, target_sentence)
-    #             save_checkpoint({
-    #                 'epoch': epoch + 1,
-    #                 'state_dict': encoder.state_dict(),
-    #                 'optimizer': encoder_optimizer.state_dict(),
-    #                 'encoder_embedding': encoder_embedding.state_dict(),
-    #                 'decoder_embedding': decoder_embedding.state_dict(),
-    #                 'loss_logger': loss_logger[network]
-    #             }, str(network if not MULTI_SINGLE else CUDA_DEVICE) + '_' + str(networks if not MULTI_SINGLE else 3) + '_' + str(hidden_size) + '_' + encoder_path)
-    #             save_checkpoint({
-    #                 'epoch': epoch + 1,
-    #                 'state_dict': decoder.state_dict(),
-    #                 'optimizer': decoder_optimizer.state_dict(),
-    #                 'encoder_embedding': encoder_embedding.state_dict(),
-    #                 'decoder_embedding': decoder_embedding.state_dict(),
-    #                 'loss_logger': loss_logger[network]
-    #             }, str(network if not MULTI_SINGLE else CUDA_DEVICE) + '_' + str(networks if not MULTI_SINGLE else 3) + '_' + str(hidden_size) + '_' + decoder_path)
-    #             network += 1
-    #         print('ensemble:')
-    #         evaluate_and_show_ensemble(input_sentence, target_sentence)
+    while epoch < n_epochs:
+        epoch += 1
+        network = 0
 
-    total_counter = 0
-    wer_sum = 0
-    hypotheses = []
-    references = []
-    for pair in pairs_test[:20000]:
-        try:
-            hypoth = evaluate_ensemble(pair[0])
-            hypotheses.append(hypoth)
-        except RuntimeError:
-            print('Runtime error for pair', pair)
-            continue
-        references.append(pair[1])
-        # print(pair[0] + '\t' + ' '.join(hypoth))
-    print(str(hidden_size), str(networks))
-    print('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~')
-    print('BLEU SCORE:', nltk.translate.bleu_score.corpus_bleu(references, hypotheses))
-    print('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~')
+        input_batches, input_lengths, target_batches, target_lengths = random_batch(get_batch_size(), network)
+
+        for decoder, decoder_optimizer in zip(decoders, decoder_optimizers):
+            # Run the train function
+            loss, ec, dc = train(
+                input_batches, input_lengths, target_batches, target_lengths,
+                encoder, decoder, encoder_optimizer, decoder_optimizer, criterion)
+
+            # Keep track of loss
+            print_loss_total[network] += loss
+
+            network += 1
+
+        network = 0
+
+        for i in range(networks):
+            if epoch % log_every == 0:
+                print_loss_avg = print_loss_total[i] / log_every
+                loss_logger[i].append(print_loss_avg)
+                print_loss_total[i] = 0
+                print_summary = 'network %s %s (%d %d%%) %.4f' % (
+                    i, time_since(start, epoch / n_epochs), epoch, epoch / n_epochs * 100, print_loss_avg)
+                print(print_summary)
+                print(loss_logger[i])
+
+        if epoch % evaluate_every == 0:
+            network = 0
+            [input_sentence, target_sentence] = random.choice(pairs_test)  # USES TEST SET
+            print('sub networks:')
+            for decoder, decoder_optimizer in zip(decoders, decoder_optimizers):
+                evaluate_not_randomly(encoder, decoder, input_sentence, target_sentence)
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'state_dict': encoder.state_dict(),
+                    'optimizer': encoder_optimizer.state_dict(),
+                    'encoder_embedding': encoder_embedding.state_dict(),
+                    'decoder_embedding': decoder_embedding.state_dict(),
+                    'loss_logger': loss_logger[network]
+                }, str(network if not MULTI_SINGLE else CUDA_DEVICE) + '_' + str(networks if not MULTI_SINGLE else 3) + '_' + str(hidden_size) + '_' + encoder_path)
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'state_dict': decoder.state_dict(),
+                    'optimizer': decoder_optimizer.state_dict(),
+                    'encoder_embedding': encoder_embedding.state_dict(),
+                    'decoder_embedding': decoder_embedding.state_dict(),
+                    'loss_logger': loss_logger[network]
+                }, str(network if not MULTI_SINGLE else CUDA_DEVICE) + '_' + str(networks if not MULTI_SINGLE else 3) + '_' + str(hidden_size) + '_' + decoder_path)
+                network += 1
+            print('ensemble:')
+            evaluate_and_show_ensemble(input_sentence, target_sentence)
+
+    # total_counter = 0
+    # wer_sum = 0
+    # hypotheses = []
+    # references = []
+    # for pair in pairs_test[:20000]:
+    #     try:
+    #         hypoth = evaluate_ensemble(pair[0])
+    #         hypotheses.append(hypoth)
+    #     except RuntimeError:
+    #         print('Runtime error for pair', pair)
+    #         continue
+    #     references.append(pair[1])
+    #     # print(pair[0] + '\t' + ' '.join(hypoth))
+    # print(str(hidden_size), str(networks))
+    # print('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~')
+    # print('BLEU SCORE:', nltk.translate.bleu_score.corpus_bleu(references, hypotheses))
+    # print('~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~')
 
     n_epochs += 10000
