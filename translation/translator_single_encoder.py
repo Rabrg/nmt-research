@@ -12,7 +12,7 @@ from translation.masked_cross_entropy import *
 from translation.time import *
 
 USE_CUDA = True
-CUDA_DEVICE = 0
+CUDA_DEVICE = 2
 torch.cuda.set_device(CUDA_DEVICE)  # TODO: 0, 1, 2
 MULTI_SINGLE = False
 
@@ -36,7 +36,7 @@ clip = 50.0
 teacher_forcing_ratio = 0.5
 learning_rate = 0.0001
 decoder_learning_ratio = 5.0
-n_epochs = 100000
+n_epochs = 200000
 epoch = 0
 log_every = 100
 evaluate_every = 500
@@ -271,7 +271,7 @@ def train(input_batches, input_lengths, target_batches, target_lengths, encoder,
 
     # Prepare input and output variables
     decoder_input = Variable(torch.LongTensor([SOS_token] * get_batch_size()))
-    decoder_hidden = encoder_hidden[:decoder.n_layers]  # Use last (forward) hidden state from encoder
+    decoder_hidden = encoder_hidden[-decoder.n_layers:]  # Use last (forward) hidden state from encoder
 
     max_target_length = max(target_lengths)
     all_decoder_outputs = Variable(torch.zeros(max_target_length, get_batch_size(), decoder.output_size))
@@ -327,7 +327,7 @@ def load_checkpoint(net, optimizer, epoch, dir, net_index):
 
 # Initialize models
 encoder = EncoderRNN(input_lang_total.n_words, hidden_size, n_layers, dropout=dropout)
-use_softmax = True
+use_softmax = False
 if not use_softmax:
     decoders = [LuongAttnDecoderRNN(attn_model, hidden_size, output_lang_total.n_words, n_layers, dropout=dropout) for i in
                 range(networks)]
@@ -378,11 +378,14 @@ print_loss_total = [0 for i in range(networks)]  # Reset every print_every
 def evaluate_ensemble(input_seq, max_length=MAX_SENT_LENGTH):
     # TODO: decoder_outputs is a numpy array and not a FloatTensor. This will run on the CPU instead of GPU,
     # and therefore may hurt performance
-    decoder_outputs = np.zeros((max_length, output_lang_total.n_words), dtype=np.float)
+    # decoder_outputs = np.zeros((max_length, output_lang_total.n_words), dtype=np.float)
+    decoder_output_list = []
     eos_indicies = Counter()
 
     for decoder in decoders:
         # try:
+            decoder_outputs = np.zeros((max_length, output_lang_total.n_words), dtype=np.float)
+            decoder_output_list.append(decoder_outputs)
             input_lengths = [len(input_seq)]
             input_seqs = [indexes_from_sentence(input_lang_total, input_seq)]
             input_batches = Variable(torch.LongTensor(input_seqs), volatile=True).transpose(0, 1)
@@ -399,7 +402,7 @@ def evaluate_ensemble(input_seq, max_length=MAX_SENT_LENGTH):
 
             # Create starting vectors for decoder
             decoder_input = Variable(torch.LongTensor([SOS_token]), volatile=True)  # SOS
-            decoder_hidden = encoder_hidden[:decoder.n_layers]  # Use last (forward) hidden state from encoder
+            decoder_hidden = encoder_hidden[-decoder.n_layers:]  # Use last (forward) hidden state from encoder
 
             if USE_CUDA:
                 decoder_input = decoder_input.cuda()
@@ -418,7 +421,8 @@ def evaluate_ensemble(input_seq, max_length=MAX_SENT_LENGTH):
                 # Choose top word from output
                 topv, topi = decoder_output.data.topk(1)
                 ni = topi[0][0]
-                decoder_outputs[di] += decoder_output.data.cpu().numpy().reshape(output_lang_total.n_words)
+                decoder_output_list[-1][di] += decoder_output.data.cpu().numpy().reshape(output_lang_total.n_words)
+                # decoder_outputs.append(decoder_output.data.cpu().numpy())
                 if ni == EOS_token:
                     # decoded_words.append('<EOS>')
                     eos_indicies[di] += 1
@@ -438,17 +442,38 @@ def evaluate_ensemble(input_seq, max_length=MAX_SENT_LENGTH):
         # except RuntimeError:
         #     print('RuntimeError for input:' + input_seq)
 
-    decoder_outputs /= 3
+    # decoder_outputs /= 3
     decoded_words = []
 
+    def softmax(array):
+        Denominator = sum([np.exp(value) for value in array])
+        array = [value/Denominator for value in array]
+        return np.asarray(array)
+
+    #Bagging
     for di in range(max_length):
-        topi = decoder_outputs[di].argsort()[-1:][::-1]
-        ni = topi[0]
+        topi_candidate_list = []
+        topv_candidate_list = []
+        for decoder in decoder_output_list:
+            softmaxed_array = softmax(decoder[di])
+            topi = softmaxed_array.argsort()[-1]
+            topi_candidate_list.append(topi)
+            topv_candidate_list.append(softmaxed_array[topi])
+        if len(set(topi_candidate_list)) == networks:
+            ni = topi_candidate_list[topv_candidate_list.index(max(topv_candidate_list))]
+            # print(output_lang_total.index2word[topi_candidate_list[0]],output_lang_total.index2word[topi_candidate_list[1]],output_lang_total.index2word[topi_candidate_list[2]])
+        else:
+            for index in topi_candidate_list:
+                if topi_candidate_list.count(index) > 1:#It works for now, but need to change if more than 3 networks are used.
+                    ni = index
         if ni == EOS_token:
             # decoded_words.append('<EOS>')
             break
         else:
             decoded_words.append(output_lang_total.index2word[ni])
+            # print(ni,)
+            # print(output_lang_total.index2word[ni],)
+
     return decoded_words
 
 

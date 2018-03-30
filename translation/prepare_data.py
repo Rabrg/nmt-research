@@ -25,7 +25,7 @@ def load_pairs(filename):
     lines = open(filename).read().strip().split('\n')
     # Split every line into pairs and normalize
     pairs = [normalize_string(l) for l in lines]
-    return pairs
+    return lines
 
 
 def combine_data(path_1, path_2, path_new):
@@ -51,21 +51,40 @@ def combine_casict2015_files(path1, path2, path_new):
     lines_combied = []
     with open(path_new, mode='wt', encoding='utf-8') as file:
         for (line1, line2) in zip(lines1, lines2):
-            line2 = ' '.join(line2)
+            # line2 = ' '.join(line2)  # TODO: only for chinese
             if len(line1.split(' ')) <= 25 and len(line2.split(' ')) <= 25:
                 lines_combied.append(line1 + '\t' + line2 + '\n')
                 file.write(line1 + '\t' + line2 + '\n')
     return lines_combied
 
 
-combined = combine_casict2015_files('../casict2015_en.txt', '../casict2015_ch.txt', '../casict2015_total.txt')
+# combined = combine_casict2015_files('../news-commentary-v12.de-en.en', '../news-commentary-v12.de-en.de', '../news-commentary-v12.de-en.de_total.txt')
+#
+# print(combined[0])
+#
 
-f = open('../casict2015_train.txt', 'w')
-for line in combined[0:int(len(combined) * 0.8)]:
+
+combined = []
+with open("../rapid2016.de-en.en") as xh:
+  with open('../rapid2016.de-en.de') as yh:
+    with open("../rapid2016.de-en.de_total.txt",mode='wt', encoding='utf-8') as zh:
+      #Read first file
+      xlines = xh.readlines()
+      #Read second file
+      ylines = yh.readlines()
+      assert(len(xlines) == len(ylines))
+      #Combine content of both lists  and Write to third file
+      for line1, line2 in zip(ylines, xlines):
+        zh.write("{}\t{}\n".format(line1.strip(), line2.strip()))
+        combined.append("{}\t{}\n".format(line1.strip(), line2.strip()))
+
+f = open('../rapid2016.de-en.de_train.txt', 'w')
+for line in combined[:int(len(combined) * 0.8)]:
+    print(line)
     f.write(line)
 f.close()
 
-f = open('../casict2015_test.txt', 'w')
+f = open('../rapid2016.de-en.de_test.txt', 'w')
 for line in combined[int(len(combined) * 0.8):]:
     f.write(line)
 f.close()

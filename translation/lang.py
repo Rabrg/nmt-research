@@ -65,6 +65,12 @@ def read_langs(lang1, lang2, dir, reverse=False):
     # Split every line into pairs and normalize
     pairs = [[normalize_string(s) for s in l.split('\t')] for l in lines]
 
+    filtered_pairs = []
+    for pair in pairs:
+        if len(pair[0].split()) <= 15 and len(pair[1].split()) <= 15:
+            filtered_pairs.append(pair)
+    pairs = filtered_pairs
+
     # Reverse pairs, make Lang instances
     if reverse:
         pairs = [list(reversed(p)) for p in pairs]
@@ -77,7 +83,7 @@ def read_langs(lang1, lang2, dir, reverse=False):
     return input_lang, output_lang, pairs
 
 
-def prepare_data(lang1_name, lang2_name, dir, reverse=False):
+def prepare_data(lang1_name, lang2_name, dir, reverse=False, MIN_COUNT=6):
     input_lang, output_lang, pairs = read_langs(lang1_name, lang2_name, dir, reverse)
     print("Read %d sentence pairs" % len(pairs))
 
@@ -87,4 +93,7 @@ def prepare_data(lang1_name, lang2_name, dir, reverse=False):
         output_lang.index_words(pair[1])
 
     print('Indexed %d words in input language, %d words in output' % (input_lang.n_words, output_lang.n_words))
+
+    input_lang.trim(MIN_COUNT)
+    output_lang.trim(MIN_COUNT)
     return input_lang, output_lang, pairs
